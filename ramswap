@@ -5,6 +5,15 @@
 # Copyright Regier Kunkel - All rights reserved.
 
 
+# TODO: Create documentation.
+# TODO: Add help menu.
+# TODO: Add support for commmand line arguments.
+# TODO: --help
+# TODO: --enable
+# TODO: --disable
+# TODO: --clear
+
+
 clear
 
 
@@ -32,6 +41,33 @@ clear_message="[.] Run \"ramswap --clear\" to clear the previously created lock 
 msg() {
   printf '%s\n' "${*}"
 }
+
+
+help="swpswpswpswpswpswpswpswpswpswpswpswpswpswpswpswp
+swp    ramswap Version: $(cat VERSION)             swp
+swp    --help  = This text.                  swp
+swp    --clear = Clears id and lock files.   swp
+swpswpswpswpswpswpswpswpswpswpswpswpswpswpswpswp"
+
+# Parse command line arguments.
+parse() {
+  local arguments="${@}"
+  for argument in "${arguments[@]}"; do
+    case "${argument}" in
+      *"--help"*)
+        msg "${help}"
+        exit 0
+        ;;
+      *"--clear"*)
+        msg "Deleting ${lock_file}"; rm -rf "${lock_file}."
+        msg "Deleting ${id_file}"; rm -rf "${id_file}."
+        ;;
+    esac
+  done
+}
+
+
+parse "${@}"
 
 
 # Checking if $id_file exists and if the swap id saved in it matches any existing zram swaps.
@@ -154,10 +190,11 @@ create_zram() {
     msg "zram device already exists at /dev/zram$(cat "${id_file}")."
     msg "Will try to reuse it."
     msg "Trying to disable and reset \"${zram_device?}\"..."
-    swapoff "${zram_device?}"
+    swapoff --verbose "${zram_device?}"
     printf '%s' "1" | tee /sys/block/"${zram_dev}"/reset > /dev/null || exit 1
     msg "...Done."
   fi
+
   msg "Setting compression algorithm to \"${compression_algorithm}\"..."
   printf '%s' "${compression_algorithm?}" | tee /sys/block/"${zram_dev}"/comp_algorithm > /dev/null || exit 1
   msg "Setting zram devices disk size to \"${zram_size}\" MB..."
