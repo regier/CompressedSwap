@@ -1,26 +1,32 @@
 #!/bin/bash
 
+# ramswap
+# A tool to create, manage and delete compressed swap in ram.
+# Copyright Regier Kunkel - All rights reserved.
+
+
+clear
+
+
+# TODO: Remove this on stable releases.
 echo "!! DO NOT USE THIS, NOT READY FOR PRODUCTION !!"
 if [[ -z "${understood}" ]]; then
   exit 0
 fi
 
-# ramswap
-# A tool to create, manage and delete compressed swap in ram.
 
 # Script configuration.
-compression_algorithm="lzo-rle"
-zram_size="4096"
-zram_priority="1000"
-mem_limit="$((zram_size - 1024))"
-lock_file="/run/lock/ramswap.lock"
-id_file="/run/ramswap.id"
-zram_id=""
-zram_dev=""
-zram_file=""
-zram_loaded=0
-load_zram=0
-unload_zram=0
+compression_algorithm="lzo-rle"                                         # Compression algorithm to use to compress the swap partition [lzo, lzo-rle, lz4, lz4hc, zstd].
+zram_size="4096"                                                        # Size of the zram partition, in MegaBytes.
+zram_priority="1000"                                                    # Priority for the new swap partition. The higher the number the higher the priority.
+
+
+# Please don't change anything below this line.
+mem_limit="$((zram_size - 1024))"                                       # Maximum amount of ram that zram will be allowed to use.
+lock_file="/run/lock/ramswap.lock"                                      # ramswap will create this file when it starts running, and delete it if it finishes succefully.
+id_file="/run/ramswap.id"                                               # ramswap will save an id for the zram swap it created to this file.
+zram_swaps=($(lsblk | grep -o 'zram[0-9]' | grep -o '[0-9]'))           # Lists, if any, any swap formated zram block devices, to the zram_swaps array.
+clear_message="[.] Run \"ramswap --clear\" to clear the previously created lock and id files. Bye!"
 
 # Message printer.
 msg() {
@@ -28,11 +34,55 @@ msg() {
 }
 
 
+# Checking if $id_file exists and if the swap id saved in it matches any existing zram swaps.
 if [[ -f "${id_file?}" ]]; then
-  zram_id="$(cat "${id_file?}")"
-  zram_dev="zram${zram_id?}"
-  zram_file="/dev/${zram_dev}"
-  msg "Detected zram previously created zram device at: \"${zram_file}\"."
+  msg "[!] I detected that ramswap was run previously."
+  msg "[?] Checking if any of the existing zram swap matches a previously created zram by ramswap."
+  for z in "${zram_swaps[@]}"; do
+    msg "[?] Checking \"zram${z}\"."
+    if [[ "$(cat "${id_file?}")" == "${z}" ]]; then
+      found_zram="${z}"
+      msg "[!] Found matching zram \"/dev/zram${z}\"."
+      unset zram_swaps
+      break
+    else
+      msg "[.] \"/dev/zram${z}\" doesn't seem to have been created by ramswap."
+    fi
+  done
+if [[ -z "${found_zram}" ]]; then                                         # Exists if none of the existing zram block devices were created by ramswap.
+    msg "[!] Error, I detected that ramswap was previously ran, however, none of the existing zram swap matches a previously created zram swap."
+    msg "${clear_message}"
+    exit 1
+  else                                                                    # If a matching zram block device was found, use the id store in $id_file.
+    unset found_zram
+    zram_id="$(cat "${id_file?}")"
+    zram_dev="zram${zram_id?}"
+    zram_device="/dev/${zram_dev?}"
+    while [[ "${reset_zram}" != "yes" && "${reset_zram}" != "no" ]]; do   # Asks the user what to do with the old block device.
+      msg "Detected previously created zram device at: \"${zram_device}\"."
+      msg "Would you like to reset and reformat it?"
+      msg "-------------------------------------------"
+      msg "Type \"yes\" to reset and reformat \"${zram_device}\"."
+      msg "Type \"no\" to close ramswap."
+      msg "-------------------------------------------"
+      read -p "Answer: " -r reset_zram
+      case "${reset_zram}" in
+        "yes")
+          msg "-------------------------------------------"
+          msg "The \"${zram_device}\" will be cleared."
+          ;;
+        "no")
+          msg "-------------------------------------------"
+          msg "${clear_message}"
+          exit 1
+      esac
+    done
+    exit 0
+  fi
+else
+  zram_id=""
+  zram_dev=""
+  zram_device=""
 fi
 
 
@@ -84,12 +134,13 @@ unload_zram() {
 # Function that will attempt to create and configure a zram device.
 create_zram() {
   msg "Trying to create a new zram device..."
-  if [[ -z "${zram_id?}" ]]; then
+  if [[ "${reset_zram}" == "yes" ]]; then
     if zram_id="$(cat /sys/class/zram-control/hot_add)"; then
       zram_dev="zram${zram_id?}"
+      zram_device="/dev/${zram_dev}"
       printf '%s' "${zram_id}" > "${id_file}"
       touch "${lock_file}"
-      export zram_id zram_dev
+      export zram_id zram_dev zram_device
       if [[ "$(dmesg | grep -wo zram[0-9] | tail -n 1)" == "${zram_dev}" ]]; then
         msg "...\"${zram_dev}\" device created."
       else
@@ -102,7 +153,10 @@ create_zram() {
   else
     msg "zram device already exists at /dev/zram$(cat "${id_file}")."
     msg "Will try to reuse it."
-    swapoff
+    msg "Trying to disable and reset \"${zram_device?}\"..."
+    swapoff "${zram_device?}"
+    printf '%s' "1" | tee /sys/block/"${zram_dev}"/reset > /dev/null || exit 1
+    msg "...Done."
   fi
   msg "Setting compression algorithm to \"${compression_algorithm}\"..."
   printf '%s' "${compression_algorithm?}" | tee /sys/block/"${zram_dev}"/comp_algorithm > /dev/null || exit 1
@@ -117,10 +171,10 @@ create_zram() {
 # Function that will format the newly created zram device as a swap partition and activate it.
 do_swap() {
   msg "Trying to format \"${zram_dev}\" as a swap partition..."
-  if mkswap --label "${zram_dev?}" --verbose "${zram_file?}"; then
+  if mkswap --label "${zram_dev?}" --verbose "${zram_device?}"; then
     msg "...\"${zram_dev}\" formated as a swap partition."
     msg "Trying to activate \"${zram_dev}\" as a swap partition..."
-    if swapon --priority "${zram_priority?}" "${zram_file?}"; then
+    if swapon --priority "${zram_priority?}" "${zram_device?}"; then
       msg "...\"${zram_dev}\" activated as a swap partition with priority \"${zram_priority}\"."
     else
       msg "...Something went wrong when activating \"${zram_dev}\" as a swap partition with priority \"${zram_priority}\"."
