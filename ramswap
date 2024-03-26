@@ -1,0 +1,141 @@
+#!/bin/bash
+
+echo "!! DO NOT USE THIS, NOT READY FOR PRODUCTION !!"
+if [[ -z "${understood}" ]]; then
+  exit 0
+fi
+
+# ramswap
+# A tool to create, manage and delete compressed swap in ram.
+
+# Script configuration.
+compression_algorithm="lzo-rle"
+zram_size="4096"
+zram_priority="1000"
+mem_limit="$((zram_size - 1024))"
+lock_file="/run/lock/ramswap.lock"
+id_file="/run/ramswap.id"
+zram_id=""
+zram_dev=""
+zram_file=""
+zram_loaded=0
+load_zram=0
+unload_zram=0
+
+# Message printer.
+msg() {
+  printf '%s\n' "${*}"
+}
+
+
+if [[ -f "${id_file?}" ]]; then
+  zram_id="$(cat "${id_file?}")"
+  zram_dev="zram${zram_id?}"
+  zram_file="/dev/${zram_dev}"
+  msg "Detected zram previously created zram device at: \"${zram_file}\"."
+fi
+
+
+# Function that checks if the zram kernel module is already loaded.
+check_module() {
+  if lsmod | grep zram &> /dev/null; then
+    zram_loaded=1
+  else
+    zram_loaded=0
+  fi
+  return "${zram_loaded}"
+}
+
+
+# Function that attempts to load the zram module.
+load_zram() {
+  if check_module; then
+    msg "Trying to load the zram module..."
+    if modprobe zram &> /dev/null; then
+      msg "...zram module loaded."
+      zram_loaded=1
+    else
+      msg "...failed to load the zram module."
+      exit 1
+    fi
+  else
+    msg "...zram module is already loaded."
+  fi
+}
+
+
+# Function that attempts to unload the zram module.
+unload_zram() {
+  if check_module; then
+    msg "zram module is already unloaded."
+  else
+    msg "Trying to unload the zram module..."
+    if rmmod zram &> /dev/null; then
+      msg "...zram module unloaded."
+      zram_loaded=0
+    else
+      msg "...failed to unload the zram module."
+      exit 1
+    fi
+  fi
+}
+
+
+# Function that will attempt to create and configure a zram device.
+create_zram() {
+  msg "Trying to create a new zram device..."
+  if [[ -z "${zram_id?}" ]]; then
+    if zram_id="$(cat /sys/class/zram-control/hot_add)"; then
+      zram_dev="zram${zram_id?}"
+      printf '%s' "${zram_id}" > "${id_file}"
+      touch "${lock_file}"
+      export zram_id zram_dev
+      if [[ "$(dmesg | grep -wo zram[0-9] | tail -n 1)" == "${zram_dev}" ]]; then
+        msg "...\"${zram_dev}\" device created."
+      else
+        msg "...\"${zram_dev}\" device created, however, I can't be sure it worked."
+      fi
+    else
+      msg "...Couldn't hot add a new device."
+      exit 1
+    fi
+  else
+    msg "zram device already exists at /dev/zram$(cat "${id_file}")."
+    msg "Will try to reuse it."
+    swapoff
+  fi
+  msg "Setting compression algorithm to \"${compression_algorithm}\"..."
+  printf '%s' "${compression_algorithm?}" | tee /sys/block/"${zram_dev}"/comp_algorithm > /dev/null || exit 1
+  msg "Setting zram devices disk size to \"${zram_size}\" MB..."
+  printf '%s' "${zram_size?}M" | tee /sys/block/"${zram_dev}"/disksize > /dev/null || exit 1
+  msg "Setting zram memory limit to \"${mem_limit}\" MB..."
+  printf '%s' "${mem_limit?}M" | tee /sys/block/"${zram_dev}"/mem_limit > /dev/null || exit 1
+  msg "...Done."
+}
+
+
+# Function that will format the newly created zram device as a swap partition and activate it.
+do_swap() {
+  msg "Trying to format \"${zram_dev}\" as a swap partition..."
+  if mkswap --label "${zram_dev?}" --verbose "${zram_file?}"; then
+    msg "...\"${zram_dev}\" formated as a swap partition."
+    msg "Trying to activate \"${zram_dev}\" as a swap partition..."
+    if swapon --priority "${zram_priority?}" "${zram_file?}"; then
+      msg "...\"${zram_dev}\" activated as a swap partition with priority \"${zram_priority}\"."
+    else
+      msg "...Something went wrong when activating \"${zram_dev}\" as a swap partition with priority \"${zram_priority}\"."
+    fi
+  else
+    msg "...Something went wrong when formating \"${zram_dev}\" as a swap partition."
+    exit 1
+  fi
+}
+
+
+load_zram
+create_zram
+do_swap
+
+#unload_zram
+rm -rf "${lock_file?}"
+exit 0
